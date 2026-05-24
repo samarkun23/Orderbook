@@ -1,6 +1,7 @@
 # 🚀 Orderbook / Matching Engine in Rust
 
-A high-performance **matching engine** built in **Rust** for **HFT (High-Frequency Trading)** environments.
+A high-performance **matching engine** built in **Rust** for **HFT (High-Frequency Trading)** environments. 
+I can execute **millions of trades per second** on a single core.
 
 The engine is designed with a strong focus on:
 
