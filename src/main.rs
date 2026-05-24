@@ -1,172 +1,237 @@
-use ::std::collections::{BTreeMap, VecDeque};
+// finally new version with some opimizations
+//! Key Optimizations:
+//! 1. Zero-Allocation Hot Path: Uses `Slab` (pre-allocated pool) for orders.
+//! 2. O(1) Operations: Price levels are doubly-linked lists of indices.
+//!    - Insert: O(log P) to find price level, O(1) to append.
+//!    - Match: O(1) to pop front.
+//!    - Cancel: O(1) via `id_map` + linked list removal.
+//! 3. Cache Locality: Indices (usize) instead of pointers/references.
+//! 4. Fast Hashing: `FxHashMap` for O(1) order lookups.
+//! 5. Minimal Branching: `#[inline(always)]` and streamlined logic.
 
-#[derive(Debug)]
-enum Side {
+use rustc_hash::FxHashMap;
+use slab::Slab;
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
     Buy,
     Sell,
 }
 
-#[derive(Debug)]
-struct Order {
-    id: u64,
-    price: u64,
-    qty: u64,
-    side: Side,
+#[derive(Debug, Clone, Copy)]
+pub struct Order {
+    pub id: u64,
+    pub price: u64,
+    pub qty: u64,
+    pub side: Side,
+    // Intrusive-style doubly linked list pointers (indices into Slab)
+    pub prev: Option<usize>,
+    pub next: Option<usize>,
 }
 
-#[derive(Debug)]
-struct OrderBook {
-    bids: BTreeMap<u64, VecDeque<Order>>,
-    asks: BTreeMap<u64, VecDeque<Order>>,
+#[derive(Debug, Default)]
+struct PriceLevel {
+    head: Option<usize>,
+    tail: Option<usize>,
 }
 
-#[derive(Debug)]
-struct MatchingEngine {
-    orderbook: OrderBook,
+pub struct OrderBook {
+    bids: BTreeMap<u64, PriceLevel>, 
+    asks: BTreeMap<u64, PriceLevel>, 
+    orders: Slab<Order>,             
+    id_map: FxHashMap<u64, usize>,   // Faster hashing for HFT
 }
 
-impl MatchingEngine {
-    fn process_order(&mut self, mut order: Order) {
-        match order.side {
-            Side::Buy => {
-                while order.qty > 0 {
-                    let best_asks = self.orderbook.asks.iter().next(); // this gives a best price means .iter().next() gives smallest price 
-                    // so this is telling if best_ask have some value extract it so in the best_ask it's like this (u64, &VecDeque<Order>) so we need u64 value means price so that it is simple verson of this
-                    // if best_ask.is_some() {
-                    //     let (price, queue) = best_ask.unwrap();
-                    // }
+#[derive(Debug, Clone, Copy)]
+pub struct Trade {
+    pub maker_id: u64,
+    pub taker_id: u64,
+    pub price: u64,
+    pub qty: u64,
+}
 
-                    // if best_asks.is_none() {
-                    //     // if the best ask is empty then we break
-                    //     break;
-                    // } // we comment this bec else break that also correct .
+impl OrderBook {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            orders: Slab::with_capacity(capacity),
+            id_map: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+        }
+    }
 
-                    if let Some((&price, _)) = best_asks {
-                        let should_remove;
+    #[inline]
+    pub fn limit_order(&mut self, taker_order: Order, trades: &mut Vec<Trade>) {
+        match taker_order.side {
+            Side::Buy => self.match_buy(taker_order, trades),
+            Side::Sell => self.match_sell(taker_order, trades),
+        }
+    }
 
-                        if price > order.price {
-                            break;
-                        }
+    fn match_buy(&mut self, mut taker: Order, trades: &mut Vec<Trade>) {
+        while taker.qty > 0 {
+            let (&best_ask_price, _) = match self.asks.iter().next() {
+                Some(entry) => entry,
+                None => break,
+            };
 
-                        {
-                            // match the order
-
-                            let order_at_place = self.orderbook.asks.get_mut(&price).unwrap(); // get tha order queue
-
-                            // let front_order = order_at_place.front_mut().unwrap(); // picking the front order
-
-                            // this is the right way or you can also do that
-                            if let Some(front_order) = order_at_place.front_mut() {
-                                // matching the order
-                                let trade_qty = std::cmp::min(order.qty, front_order.qty);
-                                println!("Trade executed: {} @ {}", trade_qty, price);
-
-                                order.qty -= trade_qty;
-                                front_order.qty -= trade_qty;
-
-                                if front_order.qty == 0 {
-                                    order_at_place.pop_front();
-                                }
-                            }
-
-                            should_remove = order_at_place.is_empty(); // this return a false or true so there is catch bro understand it . if it's return false than it's false
-                        }
-                        if should_remove {
-                            self.orderbook.asks.remove(&price);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                // the left quantity goes here
-                if order.qty > 0 {
-                    self.orderbook
-                        .bids
-                        .entry(order.price)
-                        .or_insert_with(VecDeque::new)
-                        .push_back(order);
-                }
+            if best_ask_price > taker.price {
+                break;
             }
-            Side::Sell => {
-                while order.qty > 0 {
-                    let best_bid = self.orderbook.bids.iter().next_back(); // nextback is highest price 
-                    // if best_bid.is_none(){
-                    //     break;
-                    // }
 
-                    if let Some((&price, _)) = best_bid {
-                        let should_remove: bool;
-                        if price < order.price {
-                            break;
-                        }
+            self.fill_at_price(best_ask_price, &mut taker, trades, Side::Sell);
+        }
 
-                        {
-                            let order_at_place = self.orderbook.bids.get_mut(&price).unwrap(); // get the order queue
+        if taker.qty > 0 {
+            self.insert_into_book(taker, Side::Buy);
+        }
+    }
 
-                            // let front_order = order_at_place.front_mut().unwrap(); // picking the front order
-                            if let Some(front_order) = order_at_place.front_mut() {
-                                // matching the order
-                                let trade_qty = std::cmp::min(order.qty, front_order.qty);
-                                println!("Trade executed: {} @ {}", trade_qty, price);
-                                order.qty -= trade_qty;
-                                front_order.qty -= trade_qty;
+    fn match_sell(&mut self, mut taker: Order, trades: &mut Vec<Trade>) {
+        while taker.qty > 0 {
+            let (&best_bid_price, _) = match self.bids.iter().next_back() {
+                Some(entry) => entry,
+                None => break,
+            };
 
-                                if front_order.qty == 0 {
-                                    order_at_place.pop_front();
-                                }
-                            }
+            if best_bid_price < taker.price {
+                break;
+            }
 
-                            should_remove = order_at_place.is_empty();
-                        }
+            self.fill_at_price(best_bid_price, &mut taker, trades, Side::Buy);
+        }
 
-                        if should_remove {
-                            self.orderbook.bids.remove(&price);
-                        }
-                    } else {
-                        break;
-                    }
+        if taker.qty > 0 {
+            self.insert_into_book(taker, Side::Sell);
+        }
+    }
+
+    #[inline(always)]
+    fn fill_at_price(&mut self, price: u64, taker: &mut Order, trades: &mut Vec<Trade>, maker_side: Side) {
+        let book_side = if maker_side == Side::Buy { &mut self.bids } else { &mut self.asks };
+        
+        let level = match book_side.get_mut(&price) {
+            Some(l) => l,
+            None => return,
+        };
+        
+        while let Some(maker_idx) = level.head {
+            if taker.qty == 0 { break; }
+
+            let maker = self.orders.get_mut(maker_idx).expect("Slab index must exist");
+            let trade_qty = std::cmp::min(taker.qty, maker.qty);
+
+            trades.push(Trade {
+                maker_id: maker.id,
+                taker_id: taker.id,
+                price,
+                qty: trade_qty,
+            });
+
+            taker.qty -= trade_qty;
+            maker.qty -= trade_qty;
+
+            if maker.qty == 0 {
+                let next_idx = maker.next;
+                let maker_id = maker.id;
+                
+                level.head = next_idx;
+                if let Some(next) = next_idx {
+                    self.orders.get_mut(next).unwrap().prev = None;
+                } else {
+                    level.tail = None;
                 }
 
-                if order.qty > 0 {
-                    self.orderbook
-                        .asks
-                        .entry(order.price)
-                        .or_insert_with(VecDeque::new)
-                        .push_back(order);
-                }
+                self.orders.remove(maker_idx);
+                self.id_map.remove(&maker_id);
+            } else {
+                break;
             }
         }
+
+        if level.head.is_none() {
+            book_side.remove(&price);
+        }
+    }
+
+    #[inline(always)]
+    fn insert_into_book(&mut self, mut order: Order, side: Side) {
+        let price = order.price;
+        let book_side = if side == Side::Buy { &mut self.bids } else { &mut self.asks };
+        
+        let level = book_side.entry(price).or_insert_with(PriceLevel::default);
+        
+        order.prev = level.tail;
+        order.next = None;
+        let order_id = order.id;
+        let slab_idx = self.orders.insert(order);
+        
+        if let Some(tail_idx) = level.tail {
+            self.orders.get_mut(tail_idx).unwrap().next = Some(slab_idx);
+        } else {
+            level.head = Some(slab_idx);
+        }
+        level.tail = Some(slab_idx);
+        
+        self.id_map.insert(order_id, slab_idx);
+    }
+
+    #[inline]
+    pub fn cancel_order(&mut self, order_id: u64) -> bool {
+        let slab_idx = match self.id_map.remove(&order_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let order = self.orders.remove(slab_idx);
+        let book_side = if order.side == Side::Buy { &mut self.bids } else { &mut self.asks };
+        
+        let level = match book_side.get_mut(&order.price) {
+            Some(l) => l,
+            None => return true, // Should not happen if id_map is consistent
+        };
+        
+        if let Some(prev) = order.prev {
+            self.orders.get_mut(prev).unwrap().next = order.next;
+        } else {
+            level.head = order.next;
+        }
+
+        if let Some(next) = order.next {
+            self.orders.get_mut(next).unwrap().prev = order.prev;
+        } else {
+            level.tail = order.prev;
+        }
+
+        if level.head.is_none() {
+            book_side.remove(&order.price);
+        }
+
+        true
     }
 }
 
 fn main() {
-    let mut engine = MatchingEngine {
-        orderbook: OrderBook {
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-        },
-    };
+    let mut book = OrderBook::new(100_000);
+    let mut trades = Vec::with_capacity(1000);
 
-    // add a sell order
-    engine.process_order(Order {
-        id: 1,
-        price: 100,
-        qty: 5,
-        side: Side::Sell,
-    });
-    engine.process_order(Order {
-        id: 2,
-        price: 100,
-        qty: 5,
-        side: Side::Sell,
-    });
-    engine.process_order(Order {
-        id: 3,
-        price: 100,
-        qty: 6,
-        side: Side::Buy,
-    });     
+    // Warm up
+    for i in 0..1000 {
+        let order = Order { id: i, price: 100 + (i % 10), qty: 10, side: Side::Sell, prev: None, next: None };
+        book.limit_order(order, &mut trades);
+        println!("{:?}", order);
+    }
+    trades.clear();
 
-    println!("Bids: {:?}", engine.orderbook.bids);
-    println!("Asks: {:?}", engine.orderbook.asks);
+    // Benchmark a single matching order
+    let start = Instant::now();
+    let taker = Order { id: 999_999, price: 110, qty: 500, side: Side::Buy, prev: None, next: None };
+    book.limit_order(taker, &mut trades);
+    println!("{:?}", taker);
+    let duration = start.elapsed();
+
+    println!("Matched {} trades in {:?}", trades.len(), duration);
+    println!("Latency per trade: {:?}", duration / trades.len() as u32);
 }
