@@ -1,4 +1,4 @@
-# 🚀 Orderbook in Rust
+# 🚀 Orderbook / Matching Engine in Rust
 
 A high-performance **matching engine** built in **Rust** for **HFT (High-Frequency Trading)** environments.
 
