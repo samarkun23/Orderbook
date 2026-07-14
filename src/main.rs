@@ -38,10 +38,10 @@ struct PriceLevel {
 }
 
 pub struct OrderBook {
-    bids: BTreeMap<u64, PriceLevel>, 
-    asks: BTreeMap<u64, PriceLevel>, 
-    orders: Slab<Order>,             
-    id_map: FxHashMap<u64, usize>,   // Faster hashing for HFT
+    bids: BTreeMap<u64, PriceLevel>,
+    asks: BTreeMap<u64, PriceLevel>,
+    orders: Slab<Order>,
+    id_map: FxHashMap<u64, usize>, // Fast hashing and don't need a AES instruction and using in-memory structures so HashDoS attacks are not a concern
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,18 +109,33 @@ impl OrderBook {
     }
 
     #[inline(always)]
-    fn fill_at_price(&mut self, price: u64, taker: &mut Order, trades: &mut Vec<Trade>, maker_side: Side) {
-        let book_side = if maker_side == Side::Buy { &mut self.bids } else { &mut self.asks };
-        
+    fn fill_at_price(
+        &mut self,
+        price: u64,
+        taker: &mut Order,
+        trades: &mut Vec<Trade>,
+        maker_side: Side,
+    ) {
+        let book_side = if maker_side == Side::Buy {
+            &mut self.bids
+        } else {
+            &mut self.asks
+        };
+
         let level = match book_side.get_mut(&price) {
             Some(l) => l,
             None => return,
         };
-        
-        while let Some(maker_idx) = level.head {
-            if taker.qty == 0 { break; }
 
-            let maker = self.orders.get_mut(maker_idx).expect("Slab index must exist");
+        while let Some(maker_idx) = level.head {
+            if taker.qty == 0 {
+                break;
+            }
+
+            let maker = self
+                .orders
+                .get_mut(maker_idx)
+                .expect("Slab index must exist");
             let trade_qty = std::cmp::min(taker.qty, maker.qty);
 
             trades.push(Trade {
@@ -136,7 +151,7 @@ impl OrderBook {
             if maker.qty == 0 {
                 let next_idx = maker.next;
                 let maker_id = maker.id;
-                
+
                 level.head = next_idx;
                 if let Some(next) = next_idx {
                     self.orders.get_mut(next).unwrap().prev = None;
@@ -159,22 +174,26 @@ impl OrderBook {
     #[inline(always)]
     fn insert_into_book(&mut self, mut order: Order, side: Side) {
         let price = order.price;
-        let book_side = if side == Side::Buy { &mut self.bids } else { &mut self.asks };
-        
+        let book_side = if side == Side::Buy {
+            &mut self.bids
+        } else {
+            &mut self.asks
+        };
+
         let level = book_side.entry(price).or_insert_with(PriceLevel::default);
-        
+
         order.prev = level.tail;
         order.next = None;
         let order_id = order.id;
         let slab_idx = self.orders.insert(order);
-        
+
         if let Some(tail_idx) = level.tail {
             self.orders.get_mut(tail_idx).unwrap().next = Some(slab_idx);
         } else {
             level.head = Some(slab_idx);
         }
         level.tail = Some(slab_idx);
-        
+
         self.id_map.insert(order_id, slab_idx);
     }
 
@@ -186,13 +205,17 @@ impl OrderBook {
         };
 
         let order = self.orders.remove(slab_idx);
-        let book_side = if order.side == Side::Buy { &mut self.bids } else { &mut self.asks };
-        
+        let book_side = if order.side == Side::Buy {
+            &mut self.bids
+        } else {
+            &mut self.asks
+        };
+
         let level = match book_side.get_mut(&order.price) {
             Some(l) => l,
             None => return true, // Should not happen if id_map is consistent
         };
-        
+
         if let Some(prev) = order.prev {
             self.orders.get_mut(prev).unwrap().next = order.next;
         } else {
@@ -219,7 +242,14 @@ fn main() {
 
     // Warm up
     for i in 0..1000 {
-        let order = Order { id: i, price: 100 + (i % 10), qty: 10, side: Side::Sell, prev: None, next: None };
+        let order = Order {
+            id: i,
+            price: 100 + (i % 10),
+            qty: 10,
+            side: Side::Sell,
+            prev: None,
+            next: None,
+        };
         book.limit_order(order, &mut trades);
         println!("{:?}", order);
     }
@@ -227,7 +257,14 @@ fn main() {
 
     // Benchmark a single matching order
     let start = Instant::now();
-    let taker = Order { id: 999_999, price: 110, qty: 500, side: Side::Buy, prev: None, next: None };
+    let taker = Order {
+        id: 999_999,
+        price: 110,
+        qty: 500,
+        side: Side::Buy,
+        prev: None,
+        next: None,
+    };
     book.limit_order(taker, &mut trades);
     println!("{:?}", taker);
     let duration = start.elapsed();
