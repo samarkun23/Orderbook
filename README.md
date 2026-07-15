@@ -23,6 +23,34 @@ The engine is designed with a strong focus on:
 
 ---
 
+# 📊 Benchmarks 🎯
+
+Benchmarked with [Criterion.rs](https://github.com/bheisler/criterion.rs) in release mode (`cargo bench`).
+
+## Highlights
+
+| Benchmark | Latency | Change |
+|---|---|---|
+| Cancel order | ~9.39 µs | 🟢 -24.4% faster |
+| Insert + cancel (first order) | ~11.14 µs | 🟢 -26.2% faster |
+| Multiple match | ~602 ns | 🟢 -20.1% faster |
+| Single / partial match | ~360-400 ns | ⚪ no significant change |
+| Insert order (growing book) | ~177 µs | 🔴 regressed, under investigation |
+
+> ⚠️ Note: `insert_order` in a growing orderbook regressed heavily in the latest run and is being profiled — likely candidates are price-level (BTreeMap) growth or slab reallocation.
+
+### Key Graphs
+
+<p align="center">
+  <img src="./benches/graphs/bench_cancel_order/report/pdf.svg" width="400"/>
+  <img src="./benches/graphs/matching/multipe_match/pdf.svg" width="400"/>
+  <img src="./benches/graphs/matching/partial_match/pdf.svg" width="400"/>
+  <img src="./benches/graphs/matching/single_match/pdf.svg" width="400"/>
+</p>
+
+📄 Full benchmark report, all graphs, and detailed analysis → [`benches/README.md`](./benches/README.md)
+
+
 # 🏗️ Architecture Overview
 
 The matching engine minimizes allocations and maximizes cache locality to achieve predictable performance under heavy load.

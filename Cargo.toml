@@ -7,3 +7,20 @@ edition = "2024"
 rustc-hash = "2.1.2"
 slab = "0.4.12"
 static_assertions = "1.1.0"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = 'insert'
+harness = false
+
+[[bench]]
+name = 'cancel'
+harness = false
+
+[[bench]]
+name = 'match'
+harness = false
+
+
